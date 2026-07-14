@@ -38,9 +38,19 @@ export async function checkoutLocalSale(cartItems: { productId: string; quantity
 
       // 3. Decrement stock locally
       const newStock = product.stock - item.quantity;
+      const updatedProduct = {
+        ...product,
+        stock: newStock,
+        updated_at: timestamp,
+        version: product.version + 1,
+        sync_status: 'pending' as const,
+      };
+
       await db.products.update(item.productId, { 
         stock: newStock,
-        updated_at: timestamp // Track update time for eventual last-write-wins resolution
+        updated_at: timestamp, // Track update time for eventual last-write-wins resolution
+        version: updatedProduct.version,
+        sync_status: 'pending',
       });
     }
 

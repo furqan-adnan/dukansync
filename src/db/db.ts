@@ -37,7 +37,7 @@ export interface SyncQueueItem {
   entity: 'products' | 'sales';                   // Target database table [cite: 68]
   entity_id: string;                              // Client UUID of the modified row [cite: 68]
   operation: 'INSERT' | 'UPDATE' | 'DELETE';      // Type of transactional state mutation [cite: 68]
-  payload: any;                                   // Transformed delta data packet [cite: 68]
+  payload: unknown;                               // Transformed delta data packet [cite: 68]
   timestamp: number;                              // Global sequence order epoch [cite: 68]
   device_id: string;                              // Source machine tracking signature [cite: 68]
 }
