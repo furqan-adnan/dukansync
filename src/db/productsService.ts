@@ -1,26 +1,30 @@
 import { db, type Product } from './db';
+import { getCachedProfile } from './authService';
+import { getDeviceId } from './deviceId';
+import { getActiveStoreId } from './storesService';
 
 // Simple, fast client-side UUID generator for offline isolation
 export function generateUUID(): string {
   return crypto.randomUUID();
 }
 
-// Temporary hardcoded IDs for our Phase 1 sandbox development
-const MOCK_TENANT_ID = 'tenant_01j2x';
-const MOCK_STORE_ID = 'store_lahore_01';
-const MOCK_DEVICE_ID = 'pos_register_01';
-
 /**
  * Persists a new product locally and registers an event in the sync queue.
  */
 export async function createLocalProduct(name: string, barcode: string | null, price: number, stock: number): Promise<string> {
+  const profile = await getCachedProfile();
+  if (!profile) throw new Error("Cannot create product: No active user profile.");
+
+  const storeId = await getActiveStoreId();
+  if (!storeId) throw new Error("Cannot create product: No active store selected.");
+
   const productId = generateUUID();
   const timestamp = Date.now();
 
   const newProduct: Product = {
     id: productId,
-    tenant_id: MOCK_TENANT_ID,
-    store_id: MOCK_STORE_ID,
+    tenant_id: profile.tenant_id,
+    store_id: storeId,
     updated_at: timestamp,
     version: 1,
     sync_status: 'pending',
@@ -43,7 +47,7 @@ export async function createLocalProduct(name: string, barcode: string | null, p
       operation: 'INSERT',
       payload: newProduct,
       timestamp: timestamp,
-      device_id: MOCK_DEVICE_ID,
+      device_id: getDeviceId(),
     });
   });
 

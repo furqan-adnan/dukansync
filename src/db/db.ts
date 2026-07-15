@@ -26,15 +26,24 @@ export interface SaleItem {
   priceAtSale: number;
 }
 
+
 export interface Sale extends SyncMetadata {
   items: SaleItem[];
   total: number;
 }
 
-// 3. Core Local Sync Queue Structure mandated by Section 3.2
+// 3. Audit Logs Table (Phase 3)
+export interface AuditLog extends SyncMetadata {
+  user_id: string;
+  action_type: string;
+  details: Record<string, unknown>;
+  timestamp: number;
+}
+
+// 4. Core Local Sync Queue Structure mandated by Section 3.2
 export interface SyncQueueItem {
   id?: number;                                    // Auto-incrementing index for local sequence playback 
-  entity: 'products' | 'sales';                   // Target database table [cite: 68]
+  entity: 'products' | 'sales' | 'audit_logs';    // Target database table [cite: 68]
   entity_id: string;                              // Client UUID of the modified row [cite: 68]
   operation: 'INSERT' | 'UPDATE' | 'DELETE';      // Type of transactional state mutation [cite: 68]
   payload: unknown;                               // Transformed delta data packet [cite: 68]
@@ -45,6 +54,7 @@ export interface SyncQueueItem {
 class DukanSyncDatabase extends Dexie {
   products!: Table<Product>;
   sales!: Table<Sale>;
+  auditLogs!: Table<AuditLog>;
   syncQueue!: Table<SyncQueueItem>;
 
   constructor() {
@@ -52,9 +62,10 @@ class DukanSyncDatabase extends Dexie {
     
     // Setting up indexing for fast offline lookups
     // Only index fields required for WHERE filtering and table sorting
-    this.version(1).stores({
+    this.version(2).stores({
       products: 'id, store_id, barcode, sync_status, updated_at',
       sales: 'id, store_id, sync_status, updated_at',
+      auditLogs: 'id, store_id, sync_status, timestamp',
       syncQueue: '++id, entity, operation, timestamp'
     });
   }

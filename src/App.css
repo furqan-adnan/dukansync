@@ -412,3 +412,278 @@
     grid-template-columns: 44px 1fr 44px;
   }
 }
+
+/* Navigation tabs */
+.view-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.view-tabs button {
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 7px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.view-tabs .tab-active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.view-tabs .tab-alert {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.view-tabs .tab-alert.tab-active {
+  background: var(--danger);
+  color: #fff;
+}
+
+.store-label {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.store-select {
+  min-height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0 12px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.product-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.stock-btn {
+  min-height: 36px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.receipt-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 18px 18px;
+}
+
+.receipt-actions select {
+  flex: 1;
+  min-height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0 10px;
+  background: var(--panel-muted);
+}
+
+/* Login */
+.login-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 80vh;
+}
+
+.login-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--panel);
+  padding: 2rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  width: min(400px, 100%);
+}
+
+.login-card h2 {
+  margin: 0;
+}
+
+.login-subtitle {
+  margin: 0 0 8px;
+  color: var(--muted);
+}
+
+.login-card input {
+  min-height: 42px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0 12px;
+}
+
+.loading-screen {
+  padding: 2rem;
+}
+
+/* Reports */
+.reports-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.reports-note {
+  color: var(--muted);
+}
+
+.reports-table-panel h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.reports-table {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+}
+
+.reports-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-muted);
+}
+
+.reports-row span:first-child {
+  overflow-wrap: anywhere;
+}
+
+/* Conflicts */
+.conflict-list {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.conflict-card {
+  border: 1px solid rgba(194, 65, 58, 0.3);
+  border-radius: 8px;
+  background: var(--danger-bg);
+  padding: 14px;
+}
+
+.conflict-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.conflict-card-header span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.conflict-explanation {
+  margin: 0 0 12px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.conflict-items {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.conflict-items li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 14px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border-radius: 6px;
+}
+
+.conflict-card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* Modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(23, 32, 51, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 100;
+}
+
+.modal-card {
+  background: var(--panel);
+  border-radius: 10px;
+  padding: 24px;
+  width: min(420px, 100%);
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 12px;
+}
+
+.modal-card h3 {
+  margin: 0;
+}
+
+.modal-subtitle {
+  margin: 0;
+  color: var(--muted);
+}
+
+.modal-field {
+  display: grid;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.modal-field input,
+.modal-field select {
+  min-height: 42px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0 12px;
+  font-weight: 400;
+}
+
+.modal-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 14px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+@media (max-width: 980px) {
+  .reports-grid {
+    grid-template-columns: 1fr;
+  }
+}

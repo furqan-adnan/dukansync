@@ -1,15 +1,20 @@
 import { db, type Sale, type SaleItem } from './db';
 import { generateUUID } from './productsService';
-
-const MOCK_TENANT_ID = 'tenant_01j2x';
-const MOCK_STORE_ID = 'store_lahore_01';
-const MOCK_DEVICE_ID = 'pos_register_01';
+import { getCachedProfile } from './authService';
+import { getDeviceId } from './deviceId';
+import { getActiveStoreId } from './storesService';
 
 /**
  * Processes a checkout transaction completely offline.
  * Decrements inventory stock and logs the sale event atomically.
  */
 export async function checkoutLocalSale(cartItems: { productId: string; quantity: number }[]): Promise<string> {
+  const profile = await getCachedProfile();
+  if (!profile) throw new Error("Cannot process sale: No active user profile.");
+
+  const storeId = await getActiveStoreId();
+  if (!storeId) throw new Error("Cannot process sale: No active store selected.");
+
   const saleId = generateUUID();
   const timestamp = Date.now();
   let grandTotal = 0;
@@ -53,12 +58,11 @@ export async function checkoutLocalSale(cartItems: { productId: string; quantity
         sync_status: 'pending',
       });
     }
-
     // 4. Create the final structural Sale record
     const newSale: Sale = {
       id: saleId,
-      tenant_id: MOCK_TENANT_ID,
-      store_id: MOCK_STORE_ID,
+      tenant_id: profile.tenant_id,
+      store_id: storeId,
       updated_at: timestamp,
       version: 1,
       sync_status: 'pending',
@@ -77,7 +81,7 @@ export async function checkoutLocalSale(cartItems: { productId: string; quantity
       operation: 'INSERT',
       payload: newSale,
       timestamp: timestamp,
-      device_id: MOCK_DEVICE_ID
+      device_id: getDeviceId()
     });
   });
 

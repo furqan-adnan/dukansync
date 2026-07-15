@@ -1,53 +1,130 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import './App.css';
 import { db, type Product, type Sale } from './db/db';
-import { createLocalProduct, getAllLocalProducts } from './db/productsService';
-import { checkoutLocalSale, getAllLocalSales } from './db/salesService';
+import { createLocalProduct } from './db/productsService';
+import { checkoutLocalSale } from './db/salesService';
 import { processSyncQueue } from './db/syncEngine';
+import {
+  getOfflineSession,
+  getCachedProfile,
+  fetchAndCacheProfile,
+  type UserProfile,
+  logout,
+} from './db/authService';
+import { logAuditAction } from './db/auditService';
+import { supabase } from './db/supabaseClient';
+import { getConflictedSales } from './db/conflictService';
+import { getTodaySalesTotal } from './db/reportsService';
+import {
+  fetchTenantStores,
+  getActiveStoreId,
+  getStoreProducts,
+  getStoreSales,
+  setActiveStoreId,
+  createStore,
+  type Store,
+} from './db/storesService';
+import { useOnlineSync } from './hooks/useOnlineSync';
+import { ConflictPanel } from './components/ConflictPanel';
+import { ReportsPanel } from './components/ReportsPanel';
+import { StockAdjustModal } from './components/StockAdjustModal';
+import { ReceiptPrint } from './components/ReceiptPrint';
+import { printReceipt } from './utils/printReceipt';
 
 type CartState = Record<string, number>;
 type SyncState = 'idle' | 'syncing' | 'success' | 'error';
+type AppView = 'pos' | 'reports' | 'conflicts';
 
 function App() {
   const [products, setProducts] = useState<Product[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
-  const [queueCount, setQueueCount] = useState<number>(0);
+  const [conflicts, setConflicts] = useState<Sale[]>([]);
+  const [queueCount, setQueueCount] = useState(0);
   const [cart, setCart] = useState<CartState>({});
   const [searchTerm, setSearchTerm] = useState('');
   const [syncState, setSyncState] = useState<SyncState>('idle');
   const [statusMessage, setStatusMessage] = useState('Local register ready.');
+  const [activeView, setActiveView] = useState<AppView>('pos');
+  const [stores, setStores] = useState<Store[]>([]);
+  const [activeStoreId, setActiveStoreIdState] = useState<string | null>(null);
+  const [lastSale, setLastSale] = useState<Sale | null>(null);
+  const [adjustProduct, setAdjustProduct] = useState<Product | null>(null);
+  const [receiptWidth, setReceiptWidth] = useState<'58mm' | '80mm'>('58mm');
+  const [showStoreModal, setShowStoreModal] = useState(false);
+  const [newStoreName, setNewStoreName] = useState('');
+  const [newStoreAddress, setNewStoreAddress] = useState('');
+  const [isCreatingStore, setIsCreatingStore] = useState(false);
 
-  async function refreshData() {
-    const localProds = await getAllLocalProducts();
-    const localSales = await getAllLocalSales();
-    const queue = await db.syncQueue.toArray();
+  const [session, setSession] = useState<{ user: { id: string } } | null>(null);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(true);
+
+  const refreshData = useCallback(async () => {
+    const [localProds, localSales, conflicted, queue] = await Promise.all([
+      getStoreProducts(),
+      getStoreSales(),
+      getConflictedSales(),
+      db.syncQueue.toArray(),
+    ]);
 
     setProducts(localProds);
     setSales(localSales);
+    setConflicts(conflicted);
     setQueueCount(queue.length);
-  }
+  }, []);
+
+  const handleAutoSyncComplete = useCallback(
+    (processed: number) => {
+      if (processed > 0) {
+        setSyncState('success');
+        setStatusMessage(`Auto-sync complete. Uploaded ${processed} operation(s).`);
+        void refreshData();
+      }
+    },
+    [refreshData],
+  );
+
+  useOnlineSync(handleAutoSyncComplete);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function loadInitialData() {
-      const localProds = await getAllLocalProducts();
-      const localSales = await getAllLocalSales();
-      const queue = await db.syncQueue.toArray();
-
+    async function loadAuthAndData() {
+      const activeSession = await getOfflineSession();
       if (!cancelled) {
-        setProducts(localProds);
-        setSales(localSales);
-        setQueueCount(queue.length);
+        setSession(activeSession);
+        if (activeSession) {
+          const cachedProf = await getCachedProfile();
+          setProfile(cachedProf);
+
+          fetchAndCacheProfile(activeSession.user.id)
+            .then((p) => {
+              if (!cancelled && p) setProfile(p);
+            })
+            .catch(() => {});
+        }
+        setAuthLoading(false);
+      }
+
+      if (activeSession) {
+        const storeId = await getActiveStoreId();
+        if (!cancelled) setActiveStoreIdState(storeId);
+
+        const tenantStores = await fetchTenantStores();
+        if (!cancelled) setStores(tenantStores);
+
+        await refreshData();
       }
     }
 
-    void loadInitialData();
+    void loadAuthAndData();
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshData]);
 
   const cartLines = useMemo(() => {
     return Object.entries(cart)
@@ -81,11 +158,15 @@ function App() {
   }, [products]);
 
   const cartTotal = cartLines.reduce((total, line) => total + line.lineTotal, 0);
-  const cartItemCount = cartLines.reduce((total, line) => total + line.quantity, 0);
   const lowStockCount = products.filter((product) => product.stock < 10).length;
-  const conflictCount = sales.filter((sale) => sale.sync_status === 'conflict').length;
-  const todaySalesTotal = sales.reduce((total, sale) => total + sale.total, 0);
+  const conflictCount = conflicts.length;
+  const todaySalesTotal = getTodaySalesTotal(sales);
   const latestSales = [...sales].reverse().slice(0, 6);
+  const activeStoreName =
+    stores.find((s) => s.id === activeStoreId)?.name ??
+    (profile?.role === 'owner' ? 'All stores' : 'Store register');
+
+  const isOwner = profile?.role === 'owner';
 
   async function handleSyncTrigger() {
     setSyncState('syncing');
@@ -114,9 +195,13 @@ function App() {
     const randomName = names[Math.floor(Math.random() * names.length)];
     const randomPrice = Math.floor(Math.random() * 5) * 50 + 50;
 
-    await createLocalProduct(randomName, null, randomPrice, 50);
-    await refreshData();
-    setStatusMessage(`${randomName} added to local inventory.`);
+    try {
+      await createLocalProduct(randomName, null, randomPrice, 50);
+      await refreshData();
+      setStatusMessage(`${randomName} added to local inventory.`);
+    } catch (err: unknown) {
+      setStatusMessage(getErrorMessage(err));
+    }
   }
 
   function addToCart(productId: string) {
@@ -140,6 +225,7 @@ function App() {
         nextCart[productId] = nextQuantity;
       } else {
         delete nextCart[productId];
+        void logAuditAction('cart_item_removed', { productId });
       }
 
       return nextCart;
@@ -158,29 +244,158 @@ function App() {
     }
 
     try {
-      await checkoutLocalSale(cartItems);
+      const saleId = await checkoutLocalSale(cartItems);
+      const sale = await db.sales.get(saleId);
       setCart({});
       await refreshData();
+      if (sale) setLastSale(sale);
       setStatusMessage(`Invoice saved offline for ${formatCurrency(cartTotal)}.`);
     } catch (err: unknown) {
       setStatusMessage(getErrorMessage(err));
     }
   }
 
+  function handlePrintLastReceipt() {
+    if (!lastSale) return;
+    printReceipt(receiptWidth);
+  }
+
+  async function handleStoreChange(storeId: string) {
+    if (!storeId) return;
+    setActiveStoreId(storeId);
+    setActiveStoreIdState(storeId);
+    setCart({});
+    await refreshData();
+    const store = stores.find((s) => s.id === storeId);
+    setStatusMessage(`Switched to ${store?.name ?? 'store'}.`);
+  }
+
+  async function handleCreateStore(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newStoreName.trim()) return;
+    
+    setIsCreatingStore(true);
+    try {
+      const store = await createStore(newStoreName, newStoreAddress || null);
+      const tenantStores = await fetchTenantStores();
+      setStores(tenantStores);
+      await handleStoreChange(store.id);
+      setShowStoreModal(false);
+      setNewStoreName('');
+      setNewStoreAddress('');
+      setStatusMessage(`Store "${store.name}" created successfully.`);
+    } catch (err: unknown) {
+      setStatusMessage(getErrorMessage(err));
+    } finally {
+      setIsCreatingStore(false);
+    }
+  }
+
+  async function handleLogin(e: React.FormEvent) {
+    e.preventDefault();
+    setAuthLoading(true);
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: authEmail,
+      password: authPassword,
+    });
+    if (error) {
+      alert(error.message);
+      setAuthLoading(false);
+      return;
+    }
+    setSession(data.session);
+    if (data.session) {
+      const p = await fetchAndCacheProfile(data.session.user.id);
+      setProfile(p);
+      const storeId = await getActiveStoreId();
+      setActiveStoreIdState(storeId);
+      const tenantStores = await fetchTenantStores();
+      setStores(tenantStores);
+      await refreshData();
+    }
+    setAuthLoading(false);
+  }
+
+  async function handleLogout() {
+    await logout();
+    setSession(null);
+    setProfile(null);
+    setStores([]);
+    setActiveStoreIdState(null);
+  }
+
+  if (authLoading) return <div className="loading-screen">Loading workspace...</div>;
+
+  if (!session) {
+    return (
+      <main className="pos-shell login-shell">
+        <form className="login-card" onSubmit={handleLogin}>
+          <h2>DukanSync Login</h2>
+          <p className="login-subtitle">Offline-first POS for Pakistani retail</p>
+          <input
+            type="email"
+            placeholder="Email"
+            value={authEmail}
+            onChange={(e) => setAuthEmail(e.target.value)}
+            required
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={authPassword}
+            onChange={(e) => setAuthPassword(e.target.value)}
+            required
+          />
+          <button className="primary-action" type="submit">
+            Sign In
+          </button>
+        </form>
+      </main>
+    );
+  }
+
   return (
     <main className="pos-shell">
       <header className="pos-header">
         <div>
-          <p className="eyebrow">Lahore Store Register</p>
+          <p className="eyebrow">{isOwner ? 'Owner workspace' : 'Store register'}</p>
           <h1>DukanSync POS</h1>
+          <small className="store-label">{activeStoreName}</small>
         </div>
         <div className="header-actions">
+          {isOwner && (
+            <>
+              {stores.length > 0 && (
+                <select
+                  aria-label="Select store"
+                  className="store-select"
+                  value={activeStoreId ?? ''}
+                  onChange={(e) => void handleStoreChange(e.target.value)}
+                >
+                  <option value="" disabled>Select a store</option>
+                  {stores.map((store) => (
+                    <option key={store.id} value={store.id}>
+                      {store.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <button className="secondary-action" type="button" onClick={() => setShowStoreModal(true)}>
+                New store
+              </button>
+            </>
+          )}
+          <button className="secondary-action" type="button" onClick={handleLogout}>
+            Logout
+          </button>
           <span className={`sync-pill sync-pill-${syncState}`}>
             {queueCount === 0 ? 'Cloud current' : `${queueCount} pending`}
           </span>
-          <button className="secondary-action" type="button" onClick={handleAddProduct}>
-            New product
-          </button>
+          {isOwner && activeView === 'pos' && (
+            <button className="secondary-action" type="button" onClick={handleAddProduct}>
+              New product
+            </button>
+          )}
           <button
             className="primary-action"
             type="button"
@@ -192,166 +407,297 @@ function App() {
         </div>
       </header>
 
-      <section className="metric-row" aria-label="Store summary">
-        <article className="metric-card">
-          <span>Inventory</span>
-          <strong>{products.length}</strong>
-          <small>{formatCurrency(totalInventoryValue)} in stock</small>
-        </article>
-        <article className="metric-card">
-          <span>Conflicts</span>
-          <strong>{conflictCount}</strong>
-          <small className={conflictCount > 0 ? 'danger-text' : ''}>Requires review</small>
-        </article>
-        <article className="metric-card">
-          <span>Local sales</span>
-          <strong>{sales.length}</strong>
-          <small>{formatCurrency(todaySalesTotal)} captured</small>
-        </article>
-        <article className="metric-card">
-          <span>Low stock</span>
-          <strong>{lowStockCount}</strong>
-          <small>Below 10 units</small>
-        </article>
-      </section>
+      <nav className="view-tabs" aria-label="Main navigation">
+        <button
+          className={activeView === 'pos' ? 'tab-active' : ''}
+          onClick={() => setActiveView('pos')}
+          type="button"
+        >
+          Register
+        </button>
+        <button
+          className={activeView === 'reports' ? 'tab-active' : ''}
+          onClick={() => setActiveView('reports')}
+          type="button"
+        >
+          Reports
+        </button>
+        {isOwner && (
+          <button
+            className={`${activeView === 'conflicts' ? 'tab-active' : ''} ${conflictCount > 0 ? 'tab-alert' : ''}`}
+            onClick={() => setActiveView('conflicts')}
+            type="button"
+          >
+            Conflicts {conflictCount > 0 && `(${conflictCount})`}
+          </button>
+        )}
+      </nav>
 
-      <p className={`status-line status-${syncState}`}>{statusMessage}</p>
+      {activeView === 'pos' && (
+        <>
+          <section className="metric-row" aria-label="Store summary">
+            <article className="metric-card">
+              <span>Inventory</span>
+              <strong>{products.length}</strong>
+              <small>{formatCurrency(totalInventoryValue)} in stock</small>
+            </article>
+            <article className="metric-card">
+              <span>Conflicts</span>
+              <strong>{conflictCount}</strong>
+              <small className={conflictCount > 0 ? 'danger-text' : ''}>Requires review</small>
+            </article>
+            <article className="metric-card">
+              <span>Today&apos;s sales</span>
+              <strong>{formatCurrency(todaySalesTotal)}</strong>
+              <small>{sales.length} total invoices</small>
+            </article>
+            <article className="metric-card">
+              <span>Low stock</span>
+              <strong>{lowStockCount}</strong>
+              <small>Below 10 units</small>
+            </article>
+          </section>
 
-      <section className="workspace-grid">
-        <section className="inventory-panel" aria-labelledby="inventory-heading">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">Catalog</p>
-              <h2 id="inventory-heading">Sell Items</h2>
-            </div>
-            <input
-              aria-label="Search products"
-              className="search-input"
-              onChange={(event) => setSearchTerm(event.target.value)}
-              placeholder="Search product or barcode"
-              type="search"
-              value={searchTerm}
-            />
-          </div>
+          <p className={`status-line status-${syncState}`}>{statusMessage}</p>
 
-          <div className="product-list">
-            {filteredProducts.length === 0 && (
-              <div className="empty-state">
-                <strong>No products found</strong>
-                <span>Create a product or clear the search.</span>
+          <section className="workspace-grid">
+            <section className="inventory-panel" aria-labelledby="inventory-heading">
+              <div className="panel-header">
+                <div>
+                  <p className="eyebrow">Catalog</p>
+                  <h2 id="inventory-heading">Sell Items</h2>
+                </div>
+                <input
+                  aria-label="Search products"
+                  className="search-input"
+                  onChange={(event) => setSearchTerm(event.target.value)}
+                  placeholder="Search product or barcode"
+                  type="search"
+                  value={searchTerm}
+                />
               </div>
-            )}
 
-            {filteredProducts.map((product) => {
-              const selectedQuantity = cart[product.id] || 0;
-              const isLowStock = product.stock < 10;
-
-              return (
-                <article className="product-row" key={product.id}>
-                  <div className="product-main">
-                    <strong>{product.name}</strong>
-                    <span>
-                      {formatCurrency(product.price)} · Stock{' '}
-                      <b className={isLowStock ? 'danger-text' : 'success-text'}>{product.stock}</b>
-                    </span>
+              <div className="product-list">
+                {filteredProducts.length === 0 && (
+                  <div className="empty-state">
+                    <strong>No products found</strong>
+                    <span>Create a product or clear the search.</span>
                   </div>
-                  <div className="quantity-control">
-                    <button
-                      aria-label={`Remove ${product.name}`}
-                      className="icon-button"
-                      disabled={selectedQuantity === 0}
-                      onClick={() => removeFromCart(product.id)}
-                      type="button"
-                    >
-                      -
-                    </button>
-                    <span>{selectedQuantity}</span>
-                    <button
-                      aria-label={`Add ${product.name}`}
-                      className="icon-button"
-                      disabled={selectedQuantity >= product.stock}
-                      onClick={() => addToCart(product.id)}
-                      type="button"
-                    >
-                      +
-                    </button>
+                )}
+
+                {filteredProducts.map((product) => {
+                  const selectedQuantity = cart[product.id] || 0;
+                  const isLowStock = product.stock < 10;
+
+                  return (
+                    <article className="product-row" key={product.id}>
+                      <div className="product-main">
+                        <strong>{product.name}</strong>
+                        <span>
+                          {formatCurrency(product.price)} · Stock{' '}
+                          <b className={isLowStock ? 'danger-text' : 'success-text'}>{product.stock}</b>
+                        </span>
+                      </div>
+                      <div className="product-actions">
+                        {isOwner && (
+                          <button
+                            className="secondary-action stock-btn"
+                            onClick={() => setAdjustProduct(product)}
+                            type="button"
+                          >
+                            Stock
+                          </button>
+                        )}
+                        <div className="quantity-control">
+                          <button
+                            aria-label={`Remove ${product.name}`}
+                            className="icon-button"
+                            disabled={selectedQuantity === 0}
+                            onClick={() => removeFromCart(product.id)}
+                            type="button"
+                          >
+                            -
+                          </button>
+                          <span>{selectedQuantity}</span>
+                          <button
+                            aria-label={`Add ${product.name}`}
+                            className="icon-button"
+                            disabled={selectedQuantity >= product.stock}
+                            onClick={() => addToCart(product.id)}
+                            type="button"
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+
+            <aside className="checkout-panel" aria-labelledby="cart-heading">
+              <div className="panel-header compact">
+                <div>
+                  <p className="eyebrow">Checkout</p>
+                  <h2 id="cart-heading">Current Invoice</h2>
+                </div>
+              </div>
+
+              <div className="cart-lines">
+                {cartLines.length === 0 && (
+                  <div className="empty-state">
+                    <strong>Cart is empty</strong>
+                    <span>Add products from the catalog.</span>
+                  </div>
+                )}
+
+                {cartLines.map((line) => (
+                  <div className="cart-line" key={line.product.id}>
+                    <div>
+                      <strong>{line.product.name}</strong>
+                      <span>
+                        {line.quantity} x {formatCurrency(line.product.price)}
+                      </span>
+                    </div>
+                    <b>{formatCurrency(line.lineTotal)}</b>
+                  </div>
+                ))}
+              </div>
+
+              <div className="checkout-total">
+                <span>Total</span>
+                <strong>{formatCurrency(cartTotal)}</strong>
+              </div>
+
+              <button className="checkout-button" type="button" onClick={handleCheckout}>
+                Save invoice offline
+              </button>
+
+              {lastSale && (
+                <div className="receipt-actions">
+                  <select
+                    aria-label="Receipt width"
+                    value={receiptWidth}
+                    onChange={(e) => setReceiptWidth(e.target.value as '58mm' | '80mm')}
+                  >
+                    <option value="58mm">58mm thermal</option>
+                    <option value="80mm">80mm thermal</option>
+                  </select>
+                  <button className="secondary-action" onClick={handlePrintLastReceipt} type="button">
+                    Print receipt
+                  </button>
+                </div>
+              )}
+            </aside>
+          </section>
+
+          <section className="history-panel" aria-labelledby="history-heading">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Register history</p>
+                <h2 id="history-heading">Recent Local Invoices</h2>
+              </div>
+            </div>
+
+            <div className="invoice-list">
+              {latestSales.length === 0 && (
+                <div className="empty-state">
+                  <strong>No invoices yet</strong>
+                  <span>Completed sales will appear here.</span>
+                </div>
+              )}
+
+              {latestSales.map((sale, index) => (
+                <article className="invoice-row" key={sale.id}>
+                  <div>
+                    <strong>Invoice #{sales.length - index}</strong>
+                    <span>{sale.items.reduce((total, item) => total + item.quantity, 0)} item(s)</span>
+                  </div>
+                  <div className="invoice-meta">
+                    <b>{formatCurrency(sale.total)}</b>
+                    <small className={`record-status status-${sale.sync_status}`}>{sale.sync_status}</small>
                   </div>
                 </article>
-              );
-            })}
-          </div>
-        </section>
-
-        <aside className="checkout-panel" aria-labelledby="cart-heading">
-          <div className="panel-header compact">
-            <div>
-              <p className="eyebrow">Checkout</p>
-              <h2 id="cart-heading">Current Invoice</h2>
+              ))}
             </div>
-          </div>
+          </section>
+        </>
+      )}
 
-          <div className="cart-lines">
-            {cartLines.length === 0 && (
-              <div className="empty-state">
-                <strong>Cart is empty</strong>
-                <span>Add products from the catalog.</span>
-              </div>
-            )}
+      {activeView === 'reports' && <ReportsPanel sales={sales} products={products} />}
 
-            {cartLines.map((line) => (
-              <div className="cart-line" key={line.product.id}>
-                <div>
-                  <strong>{line.product.name}</strong>
-                  <span>
-                    {line.quantity} x {formatCurrency(line.product.price)}
-                  </span>
-                </div>
-                <b>{formatCurrency(line.lineTotal)}</b>
-              </div>
-            ))}
-          </div>
+      {activeView === 'conflicts' && isOwner && (
+        <ConflictPanel conflicts={conflicts} products={products} onResolved={refreshData} />
+      )}
 
-          <div className="checkout-total">
-            <span>Total</span>
-            <strong>{formatCurrency(cartTotal)}</strong>
-          </div>
+      <ReceiptPrint
+        sale={lastSale}
+        products={products}
+        storeName={activeStoreName}
+        width={receiptWidth}
+      />
 
-          <button className="checkout-button" type="button" onClick={handleCheckout}>
-            Save invoice offline
-          </button>
-        </aside>
-      </section>
+      <StockAdjustModal
+        product={adjustProduct}
+        onClose={() => setAdjustProduct(null)}
+        onAdjusted={refreshData}
+      />
 
-      <section className="history-panel" aria-labelledby="history-heading">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Register history</p>
-            <h2 id="history-heading">Recent Local Invoices</h2>
-          </div>
-        </div>
+      {showStoreModal && (
+        <div className="modal-overlay" role="presentation" onClick={() => setShowStoreModal(false)}>
+          <form
+            className="modal-card"
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={handleCreateStore}
+            aria-labelledby="store-modal-title"
+          >
+            <h3 id="store-modal-title">Create New Store</h3>
+            <p className="modal-subtitle">Setup a new branch for your tenant</p>
 
-        <div className="invoice-list">
-          {latestSales.length === 0 && (
-            <div className="empty-state">
-              <strong>No invoices yet</strong>
-              <span>Completed sales will appear here.</span>
+            <label className="modal-field">
+              Store Name
+              <input
+                type="text"
+                required
+                placeholder="e.g., Lahore Main Branch"
+                value={newStoreName}
+                onChange={(e) => setNewStoreName(e.target.value)}
+                disabled={isCreatingStore}
+              />
+            </label>
+
+            <label className="modal-field">
+              Address (Optional)
+              <input
+                type="text"
+                placeholder="e.g., Gulberg III"
+                value={newStoreAddress}
+                onChange={(e) => setNewStoreAddress(e.target.value)}
+                disabled={isCreatingStore}
+              />
+            </label>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary-action"
+                onClick={() => setShowStoreModal(false)}
+                disabled={isCreatingStore}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="primary-action"
+                disabled={isCreatingStore || !newStoreName.trim()}
+              >
+                {isCreatingStore ? 'Creating...' : 'Create Store'}
+              </button>
             </div>
-          )}
-
-          {latestSales.map((sale, index) => (
-            <article className="invoice-row" key={sale.id}>
-              <div>
-                <strong>Invoice #{sales.length - index}</strong>
-                <span>{sale.items.reduce((total, item) => total + item.quantity, 0)} item(s)</span>
-              </div>
-              <div className="invoice-meta">
-                <b>{formatCurrency(sale.total)}</b>
-                <small className={`record-status status-${sale.sync_status}`}>{sale.sync_status}</small>
-              </div>
-            </article>
-          ))}
+          </form>
         </div>
-      </section>
+      )}
     </main>
   );
 }
