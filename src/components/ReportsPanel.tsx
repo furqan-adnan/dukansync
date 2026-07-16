@@ -1,23 +1,29 @@
-import type { Product, Sale } from '../db/db';
-import {
-  getBestSellers,
-  getDailySalesSummaries,
-  getTodaySalesTotal,
-} from '../db/reportsService';
+import type { AnalyticsSummary } from '../db/reportsService';
 
 interface ReportsPanelProps {
-  sales: Sale[];
-  products: Product[];
+  analytics: AnalyticsSummary | null;
 }
 
 function formatCurrency(amount: number): string {
   return `${amount.toLocaleString('en-PK')} PKR`;
 }
 
-export function ReportsPanel({ sales, products }: ReportsPanelProps) {
-  const todayTotal = getTodaySalesTotal(sales);
-  const dailySummaries = getDailySalesSummaries(sales, 7);
-  const bestSellers = getBestSellers(sales, products, 5);
+export function ReportsPanel({ analytics }: ReportsPanelProps) {
+  if (!analytics) {
+    return (
+      <section className="reports-grid" aria-labelledby="reports-heading">
+        <div className="panel-header" style={{ gridColumn: '1 / -1' }}>
+          <div>
+            <p className="eyebrow">Analytics</p>
+            <h2 id="reports-heading">Sales Reports</h2>
+          </div>
+          <small className="reports-note">Loading analytics...</small>
+        </div>
+      </section>
+    );
+  }
+
+  const { todayTotal, dailySummaries, bestSellers } = analytics;
 
   return (
     <section className="reports-grid" aria-labelledby="reports-heading">

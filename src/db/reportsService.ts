@@ -1,4 +1,5 @@
 import type { Product, Sale } from './db';
+import { supabase } from './supabaseClient';
 
 export interface DailySalesSummary {
   date: string;
@@ -86,4 +87,62 @@ export function getTodaySalesTotal(sales: Sale[]): number {
   return sales
     .filter((s) => s.sync_status !== 'conflict' && s.updated_at >= todayStart)
     .reduce((sum, s) => sum + s.total, 0);
+}
+
+export interface AnalyticsSummary {
+  todayTotal: number;
+  dailySummaries: DailySalesSummary[];
+  bestSellers: BestSeller[];
+}
+
+/**
+ * Attempts to fetch highly-optimized server-side analytics from the Supabase RPC.
+ * If offline, or if it fails, falls back gracefully to calculating it locally.
+ */
+export async function getAnalyticsDashboard(
+  tenantId: string,
+  storeId: string | null,
+  localSales: Sale[],
+  localProducts: Product[]
+): Promise<AnalyticsSummary> {
+  // 1. Try Server-Side Aggregation
+  if (navigator.onLine) {
+    try {
+      const { data, error } = await supabase.rpc('get_dashboard_analytics', {
+        p_tenant_id: tenantId,
+        p_store_id: storeId,
+      });
+
+      if (!error && data) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const payload = data as any;
+        
+        return {
+          todayTotal: Number(payload.todayTotal || payload.todaytotal || 0),
+          dailySummaries: (payload.dailySummaries || payload.dailysummaries || []).map((d: any) => ({
+            date: d.date,
+            totalSales: Number(d.totalSales ?? d.totalsales ?? 0),
+            invoiceCount: Number(d.invoiceCount ?? d.invoicecount ?? 0),
+            itemCount: Number(d.itemCount ?? d.itemcount ?? 0),
+          })),
+          bestSellers: (payload.bestSellers || payload.bestsellers || []).map((b: any) => ({
+            productId: b.productId || b.productid,
+            productName: b.productName || b.productname || 'Unknown',
+            quantitySold: Number(b.quantitySold ?? b.quantitysold ?? 0),
+            revenue: Number(b.revenue ?? 0),
+          })),
+        };
+      }
+    } catch (error) {
+      console.warn("Failed to fetch server analytics. Falling back to local calculation.", error);
+    }
+  }
+
+  // 2. Fallback to Local Offline Calculation
+  console.log("Using local analytics fallback.");
+  return {
+    todayTotal: getTodaySalesTotal(localSales),
+    dailySummaries: getDailySalesSummaries(localSales, 7),
+    bestSellers: getBestSellers(localSales, localProducts, 5),
+  };
 }

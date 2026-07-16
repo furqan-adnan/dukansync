@@ -14,7 +14,7 @@ import {
 } from './db/authService';
 import { logAuditAction } from './db/auditService';
 import { getConflictedSales } from './db/conflictService';
-import { getTodaySalesTotal } from './db/reportsService';
+import { getAnalyticsDashboard, getTodaySalesTotal, type AnalyticsSummary } from './db/reportsService';
 import {
   fetchTenantStores,
   getActiveStoreId,
@@ -39,6 +39,7 @@ function App() {
   const [products, setProducts] = useState<Product[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
   const [conflicts, setConflicts] = useState<Sale[]>([]);
+  const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
   const [queueCount, setQueueCount] = useState(0);
   const [cart, setCart] = useState<CartState>({});
   const [searchTerm, setSearchTerm] = useState('');
@@ -73,6 +74,14 @@ function App() {
     setSales(localSales);
     setConflicts(conflicted);
     setQueueCount(queue);
+
+    // Fetch Analytics (Will try server RPC first, then fallback to localSales)
+    const p = await getCachedProfile();
+    const storeId = await getActiveStoreId();
+    if (p) {
+      const analyticsData = await getAnalyticsDashboard(p.tenant_id, storeId, localSales, localProds);
+      setAnalytics(analyticsData);
+    }
   }, []);
 
   const handleAutoSyncComplete = useCallback(
@@ -624,7 +633,7 @@ function App() {
         </>
       )}
 
-      {activeView === 'reports' && <ReportsPanel sales={sales} products={products} />}
+      {activeView === 'reports' && <ReportsPanel analytics={analytics} />}
 
       {activeView === 'conflicts' && isOwner && (
         <ConflictPanel conflicts={conflicts} products={products} onResolved={refreshData} />
