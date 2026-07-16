@@ -19,6 +19,10 @@ interface BatchSyncResult {
 
 let isSyncing = false;
 
+export async function getPendingQueueCount(): Promise<number> {
+  return await db.syncQueue.count();
+}
+
 export async function processSyncQueue(): Promise<SyncResponse> {
   if (isSyncing) {
     console.warn('Sync Engine: Sync already in progress, ignoring duplicate trigger.');
@@ -322,8 +326,7 @@ async function getSaleCloudPayload(item: SyncQueueItem) {
 }
 
 async function getAuditLogCloudPayload(item: SyncQueueItem) {
-  const latestLog = await db.auditLogs.get(item.entity_id);
-  const log = (latestLog ?? item.payload) as AuditLog;
+  const log = item.payload as AuditLog;
 
   return {
     id: log.id,

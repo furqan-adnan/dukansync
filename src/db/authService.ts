@@ -56,3 +56,12 @@ export async function logout() {
   localStorage.removeItem(PROFILE_CACHE_KEY);
   await supabase.auth.signOut();
 }
+
+/**
+ * Abstracts Supabase authentication to keep the UI clean.
+ */
+export async function login(email: string, password: string) {
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+  return data.session;
+}

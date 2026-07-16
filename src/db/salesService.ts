@@ -89,6 +89,13 @@ export async function checkoutLocalSale(cartItems: { productId: string; quantity
 }
 
 /**
+ * Retrieves a specific sale by its ID from the local database.
+ */
+export async function getSaleById(id: string): Promise<Sale | undefined> {
+  return await db.sales.get(id);
+}
+
+/**
  * Retrieves all locally saved invoices.
  */
 export async function getAllLocalSales(): Promise<Sale[]> {

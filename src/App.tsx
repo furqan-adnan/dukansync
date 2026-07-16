@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import './App.css';
-import { db, type Product, type Sale } from './db/db';
+import { type Product, type Sale } from './db/db';
 import { createLocalProduct } from './db/productsService';
-import { checkoutLocalSale } from './db/salesService';
-import { processSyncQueue } from './db/syncEngine';
+import { getSaleById, checkoutLocalSale } from './db/salesService';
+import { processSyncQueue, getPendingQueueCount } from './db/syncEngine';
 import {
   getOfflineSession,
   getCachedProfile,
   fetchAndCacheProfile,
   type UserProfile,
   logout,
+  login,
 } from './db/authService';
 import { logAuditAction } from './db/auditService';
-import { supabase } from './db/supabaseClient';
 import { getConflictedSales } from './db/conflictService';
 import { getTodaySalesTotal } from './db/reportsService';
 import {
@@ -66,13 +66,13 @@ function App() {
       getStoreProducts(),
       getStoreSales(),
       getConflictedSales(),
-      db.syncQueue.toArray(),
+      getPendingQueueCount(),
     ]);
 
     setProducts(localProds);
     setSales(localSales);
     setConflicts(conflicted);
-    setQueueCount(queue.length);
+    setQueueCount(queue);
   }, []);
 
   const handleAutoSyncComplete = useCallback(
@@ -245,7 +245,7 @@ function App() {
 
     try {
       const saleId = await checkoutLocalSale(cartItems);
-      const sale = await db.sales.get(saleId);
+      const sale = await getSaleById(saleId);
       setCart({});
       await refreshData();
       if (sale) setLastSale(sale);
@@ -294,26 +294,25 @@ function App() {
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     setAuthLoading(true);
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: authEmail,
-      password: authPassword,
-    });
-    if (error) {
-      alert(error.message);
+    
+    try {
+      const activeSession = await login(authEmail, authPassword);
+      setSession(activeSession);
+      
+      if (activeSession) {
+        const p = await fetchAndCacheProfile(activeSession.user.id);
+        setProfile(p);
+        const storeId = await getActiveStoreId();
+        setActiveStoreIdState(storeId);
+        const tenantStores = await fetchTenantStores();
+        setStores(tenantStores);
+        await refreshData();
+      }
+    } catch (error: unknown) {
+      alert(getErrorMessage(error));
+    } finally {
       setAuthLoading(false);
-      return;
     }
-    setSession(data.session);
-    if (data.session) {
-      const p = await fetchAndCacheProfile(data.session.user.id);
-      setProfile(p);
-      const storeId = await getActiveStoreId();
-      setActiveStoreIdState(storeId);
-      const tenantStores = await fetchTenantStores();
-      setStores(tenantStores);
-      await refreshData();
-    }
-    setAuthLoading(false);
   }
 
   async function handleLogout() {
