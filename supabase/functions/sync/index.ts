@@ -8,6 +8,7 @@ interface SyncOperation {
   payload: Record<string, unknown>;
   timestamp: number;
   device_id: string;
+  idempotency_key?: string;
 }
 
 interface SyncRequest {
@@ -78,7 +79,22 @@ serve(async (req) => {
     // Process operations in timestamp order (idempotent via client UUID)
     const sorted = [...operations].sort((a, b) => a.timestamp - b.timestamp);
 
+    // Fetch existing idempotency keys to prevent duplicates
+    const incomingKeys = sorted.map(op => op.idempotency_key).filter(Boolean) as string[];
+    const { data: existingKeys } = await userClient
+      .from('idempotency_keys')
+      .select('idempotency_key')
+      .in('idempotency_key', incomingKeys);
+      
+    const existingKeySet = new Set(existingKeys?.map(k => k.idempotency_key) ?? []);
+    const newKeysToInsert = new Set<string>();
+
     for (const op of sorted) {
+      if (op.idempotency_key && existingKeySet.has(op.idempotency_key)) {
+        processed++; // Already processed successfully in a previous drop
+        continue;
+      }
+
       if (op.operation === 'DELETE') {
         const { error } = await userClient.from(op.entity).delete().eq('id', op.entity_id);
         if (!error) processed++;
@@ -148,6 +164,18 @@ serve(async (req) => {
           processed++;
         }
       }
+      
+      // Mark as processed
+      if (op.idempotency_key) {
+        newKeysToInsert.add(op.idempotency_key);
+      }
+    }
+
+    // Persist new idempotency keys in bulk
+    if (newKeysToInsert.size > 0) {
+      await userClient.from('idempotency_keys').insert(
+        Array.from(newKeysToInsert).map(k => ({ idempotency_key: k }))
+      );
     }
 
     // Return authoritative state for client merge

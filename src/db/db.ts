@@ -49,6 +49,30 @@ export interface SyncQueueItem {
   payload: unknown;                               // Transformed delta data packet [cite: 68]
   timestamp: number;                              // Global sequence order epoch [cite: 68]
   device_id: string;                              // Source machine tracking signature [cite: 68]
+  idempotency_key: string;                        // Prevents duplicate syncs [Phase 1]
+  attempt_count: number;                          // Tracks retry limits [Phase 1]
+  last_error?: string;                            // Context for dead letter queues [Phase 1]
+  last_attempt_at?: number;                       // Used for exponential backoff [Phase 2]
+}
+
+// 5. Dead Letter Queue for permanently failed items [Phase 2]
+export interface DeadLetterQueueItem {
+  id?: number;
+  original_queue_item: SyncQueueItem;
+  failed_at: number;
+  failure_reason: string;
+  resolved: boolean;
+  resolved_at: number | null;
+  resolution_notes: string | null;
+}
+
+// 6. Sync Checkpoints for large queue processing [Phase 2]
+export interface SyncCheckpoint {
+  id?: number;
+  last_processed_queue_id: number;
+  processed_count: number;
+  created_at: number;
+  sync_session_id: string;
 }
 
 class DukanSyncDatabase extends Dexie {
@@ -56,6 +80,9 @@ class DukanSyncDatabase extends Dexie {
   sales!: Table<Sale>;
   auditLogs!: Table<AuditLog>;
   syncQueue!: Table<SyncQueueItem>;
+
+  deadLetterQueue!: Table<DeadLetterQueueItem>;
+  syncCheckpoints!: Table<SyncCheckpoint>;
 
   constructor() {
     super('DukanSyncDB');
@@ -67,6 +94,29 @@ class DukanSyncDatabase extends Dexie {
       sales: 'id, store_id, sync_status, updated_at',
       auditLogs: 'id, store_id, sync_status, timestamp',
       syncQueue: '++id, entity, operation, timestamp'
+    });
+
+    // Phase 1 Migration: Add Idempotency & Retry Metadata
+    this.version(3).stores({
+      products: 'id, store_id, barcode, sync_status, updated_at',
+      sales: 'id, store_id, sync_status, updated_at',
+      auditLogs: 'id, store_id, sync_status, timestamp',
+      syncQueue: '++id, entity, operation, timestamp, idempotency_key'
+    }).upgrade((tx) => {
+      return tx.table('syncQueue').toCollection().modify((item) => {
+        item.attempt_count = 0;
+        item.idempotency_key = `${item.device_id}_${item.timestamp}_${item.operation}_${item.entity_id}`;
+      });
+    });
+
+    // Phase 2 Migration: Add DLQ and Checkpoints
+    this.version(4).stores({
+      products: 'id, store_id, barcode, sync_status, updated_at',
+      sales: 'id, store_id, sync_status, updated_at',
+      auditLogs: 'id, store_id, sync_status, timestamp',
+      syncQueue: '++id, entity, operation, timestamp, idempotency_key',
+      deadLetterQueue: '++id, resolved, failed_at',
+      syncCheckpoints: '++id, sync_session_id, created_at'
     });
   }
 }

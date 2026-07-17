@@ -5,7 +5,10 @@ import './index.css';
 import App from './App.tsx';
 import { getDeviceId } from './db/deviceId';
 
+import { initializeSyncEngine } from './db/syncEngine';
+
 getDeviceId();
+initializeSyncEngine().catch(console.error);
 
 registerSW({
   onOfflineReady() {

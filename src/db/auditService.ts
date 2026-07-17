@@ -2,6 +2,8 @@ import { db, type AuditLog } from './db';
 import { getCachedProfile } from './authService';
 import { getDeviceId } from './deviceId';
 
+import { generateIdempotencyKey } from '../utils/idempotency';
+
 /**
  * Intercepts sensitive events and writes an unalterable log to the local Dexie store,
  * while simultaneously queueing it for synchronization to the backend.
@@ -16,6 +18,7 @@ export async function logAuditAction(actionType: string, details: Record<string,
 
   const logId = crypto.randomUUID();
   const timestamp = Date.now();
+  const deviceId = getDeviceId();
 
   const newLog: AuditLog = {
     id: logId,
@@ -43,7 +46,9 @@ export async function logAuditAction(actionType: string, details: Record<string,
       operation: 'INSERT',
       payload: newLog,
       timestamp: timestamp,
-      device_id: getDeviceId()
+      device_id: deviceId,
+      idempotency_key: generateIdempotencyKey(deviceId, timestamp, 'INSERT', logId),
+      attempt_count: 0,
     });
   });
 

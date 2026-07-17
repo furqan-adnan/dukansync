@@ -14,7 +14,20 @@ declare
   current_stock int;
   is_conflict boolean := false;
   authoritative_products jsonb := '[]'::jsonb;
+  i_key text;
 begin
+  i_key := sale_payload->>'idempotency_key';
+  
+  IF i_key IS NOT NULL THEN
+    -- Check if we already processed this
+    IF EXISTS (SELECT 1 FROM idempotency_keys WHERE idempotency_key = i_key) THEN
+      RETURN jsonb_build_object('success', true, 'sync_status', 'synced', 'duplicate', true);
+    END IF;
+    
+    -- Insert the key to prevent future duplicates
+    INSERT INTO idempotency_keys (idempotency_key) VALUES (i_key) ON CONFLICT DO NOTHING;
+  END IF;
+
   -- 1. Try to decrement stock for all items
   for item in select * from jsonb_array_elements(sale_payload->'items') loop
     product_id := (item->>'productId')::uuid;

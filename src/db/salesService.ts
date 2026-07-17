@@ -4,6 +4,8 @@ import { getCachedProfile } from './authService';
 import { getDeviceId } from './deviceId';
 import { getActiveStoreId } from './storesService';
 
+import { generateIdempotencyKey } from '../utils/idempotency';
+
 /**
  * Processes a checkout transaction completely offline.
  * Decrements inventory stock and logs the sale event atomically.
@@ -17,6 +19,7 @@ export async function checkoutLocalSale(cartItems: { productId: string; quantity
 
   const saleId = generateUUID();
   const timestamp = Date.now();
+  const deviceId = getDeviceId();
   let grandTotal = 0;
   const processedItems: SaleItem[] = [];
 
@@ -81,7 +84,9 @@ export async function checkoutLocalSale(cartItems: { productId: string; quantity
       operation: 'INSERT',
       payload: newSale,
       timestamp: timestamp,
-      device_id: getDeviceId()
+      device_id: deviceId,
+      idempotency_key: generateIdempotencyKey(deviceId, timestamp, 'INSERT', saleId),
+      attempt_count: 0,
     });
   });
 

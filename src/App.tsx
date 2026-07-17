@@ -30,10 +30,12 @@ import { ReportsPanel } from './components/ReportsPanel';
 import { StockAdjustModal } from './components/StockAdjustModal';
 import { ReceiptPrint } from './components/ReceiptPrint';
 import { printReceipt } from './utils/printReceipt';
+import { DeadLetterPanel } from './components/DeadLetterPanel';
+import { getDeadLetterStats } from './db/deadLetterService';
 
 type CartState = Record<string, number>;
 type SyncState = 'idle' | 'syncing' | 'success' | 'error';
-type AppView = 'pos' | 'reports' | 'conflicts';
+type AppView = 'pos' | 'reports' | 'conflicts' | 'dlq';
 
 function App() {
   const [products, setProducts] = useState<Product[]>([]);
@@ -41,6 +43,7 @@ function App() {
   const [conflicts, setConflicts] = useState<Sale[]>([]);
   const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
   const [queueCount, setQueueCount] = useState(0);
+  const [dlqCount, setDlqCount] = useState(0);
   const [cart, setCart] = useState<CartState>({});
   const [searchTerm, setSearchTerm] = useState('');
   const [syncState, setSyncState] = useState<SyncState>('idle');
@@ -63,17 +66,19 @@ function App() {
   const [authLoading, setAuthLoading] = useState(true);
 
   const refreshData = useCallback(async () => {
-    const [localProds, localSales, conflicted, queue] = await Promise.all([
+    const [localProds, localSales, conflicted, queue, dlqStats] = await Promise.all([
       getStoreProducts(),
       getStoreSales(),
       getConflictedSales(),
       getPendingQueueCount(),
+      getDeadLetterStats(),
     ]);
 
     setProducts(localProds);
     setSales(localSales);
     setConflicts(conflicted);
     setQueueCount(queue);
+    setDlqCount(dlqStats.unresolved);
 
     // Fetch Analytics (Will try server RPC first, then fallback to localSales)
     const p = await getCachedProfile();
@@ -431,15 +436,33 @@ function App() {
           Reports
         </button>
         {isOwner && (
-          <button
-            className={`${activeView === 'conflicts' ? 'tab-active' : ''} ${conflictCount > 0 ? 'tab-alert' : ''}`}
-            onClick={() => setActiveView('conflicts')}
-            type="button"
-          >
-            Conflicts {conflictCount > 0 && `(${conflictCount})`}
-          </button>
+          <>
+            <button
+              className={`${activeView === 'conflicts' ? 'tab-active' : ''} ${conflictCount > 0 ? 'tab-alert' : ''}`}
+              onClick={() => setActiveView('conflicts')}
+              type="button"
+            >
+              Conflicts {conflictCount > 0 && `(${conflictCount})`}
+            </button>
+            <button
+              className={`${activeView === 'dlq' ? 'tab-active' : ''} ${dlqCount > 0 ? 'tab-alert' : ''}`}
+              onClick={() => setActiveView('dlq')}
+              type="button"
+            >
+              Dead Letters {dlqCount > 0 && `(${dlqCount})`}
+            </button>
+          </>
         )}
       </nav>
+
+      {isOwner && dlqCount >= 10 && (
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative m-4 shadow-sm" role="alert">
+          <strong className="font-bold">Attention Needed! </strong>
+          <span className="block sm:inline">
+            The Dead Letter Queue has {dlqCount} unresolved items blocking synchronization. Please review them immediately.
+          </span>
+        </div>
+      )}
 
       {activeView === 'pos' && (
         <>
@@ -637,6 +660,12 @@ function App() {
 
       {activeView === 'conflicts' && isOwner && (
         <ConflictPanel conflicts={conflicts} products={products} onResolved={refreshData} />
+      )}
+
+      {activeView === 'dlq' && isOwner && (
+        <div className="p-4">
+          <DeadLetterPanel />
+        </div>
       )}
 
       <ReceiptPrint

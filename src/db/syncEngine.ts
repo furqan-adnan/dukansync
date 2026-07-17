@@ -1,6 +1,7 @@
 import { db, type Product, type Sale, type SyncQueueItem, type AuditLog } from './db';
 import { supabase } from './supabaseClient';
 import { getDeviceId } from './deviceId';
+import { moveToDeadLetterQueue } from './deadLetterService';
 
 interface SyncResponse {
   success: boolean;
@@ -18,6 +19,8 @@ interface BatchSyncResult {
 }
 
 let isSyncing = false;
+const SYNC_SESSION_ID = crypto.randomUUID();
+const CHECKPOINT_INTERVAL = 10; // Save checkpoint every 10 items
 
 export async function getPendingQueueCount(): Promise<number> {
   return await db.syncQueue.count();
@@ -30,11 +33,32 @@ export async function processSyncQueue(): Promise<SyncResponse> {
   }
 
   isSyncing = true;
+  let processedCount = 0;
+  
   try {
-    const queue = await db.syncQueue.orderBy('id').toArray();
+    // Load from checkpoint if exists
+    const lastCheckpoint = await db.syncCheckpoints
+      .where('sync_session_id')
+      .equals(SYNC_SESSION_ID)
+      .last();
+
+    let queue = await db.syncQueue.orderBy('timestamp').toArray();
+
+    // Resume from checkpoint
+    if (lastCheckpoint) {
+      console.log(`Resuming from checkpoint: ${lastCheckpoint.last_processed_queue_id}`);
+      queue = queue.filter(item => (item.id || 0) > lastCheckpoint.last_processed_queue_id);
+      processedCount = lastCheckpoint.processed_count;
+    }
 
     if (queue.length === 0) {
       console.log('Sync Engine: Queue is completely clean. No pending events.');
+      // Clean up old checkpoints from other sessions
+      await db.syncCheckpoints
+        .where('sync_session_id')
+        .notEqual(SYNC_SESSION_ID)
+        .delete();
+        
       try {
         await pullLatestStateFromCloud();
       } catch (err: unknown) {
@@ -45,28 +69,41 @@ export async function processSyncQueue(): Promise<SyncResponse> {
 
     console.log(`Sync Engine: Commencing batch upload for ${queue.length} pending events...`);
 
-    // Try unified /sync endpoint first (project plan §3.4)
-    const batchResult = await tryBatchSync(queue);
-    if (batchResult) {
-      return batchResult;
+    // If we have a checkpoint, a previous batch failed or we crashed mid-sequential. Skip batch.
+    if (!lastCheckpoint) {
+      // Try unified /sync endpoint first
+      const batchResult = await tryBatchSync(queue);
+      if (batchResult) {
+        return batchResult;
+      }
     }
 
-    // Fallback: sequential per-item push
-    return await sequentialPush(queue);
+    // Fallback: sequential per-item push with retries, DLQ, and Checkpoints
+    return await sequentialPushWithRetry(queue, processedCount, SYNC_SESSION_ID);
   } finally {
     isSyncing = false;
   }
 }
 
+export async function saveCheckpoint(lastProcessedId: number, count: number, sessionId: string): Promise<void> {
+  await db.syncCheckpoints.put({
+    last_processed_queue_id: lastProcessedId,
+    processed_count: count,
+    created_at: Date.now(),
+    sync_session_id: sessionId
+  });
+}
+
 async function tryBatchSync(queue: SyncQueueItem[]): Promise<SyncResponse | null> {
   try {
-    const operations = queue.map(({ entity, entity_id, operation, payload, timestamp, device_id }) => ({
-      entity,
-      entity_id,
-      operation,
-      payload,
-      timestamp,
-      device_id,
+    const operations = queue.map((item) => ({
+      entity: item.entity,
+      entity_id: item.entity_id,
+      operation: item.operation,
+      payload: item.payload,
+      timestamp: item.timestamp,
+      device_id: item.device_id,
+      idempotency_key: item.idempotency_key, // Passed to backend for deduplication
     }));
 
     const { data, error } = await supabase.functions.invoke('sync', {
@@ -81,24 +118,26 @@ async function tryBatchSync(queue: SyncQueueItem[]): Promise<SyncResponse | null
     const result = data as BatchSyncResult;
     let processedCount = 0;
 
-    // Handle conflicts and drain queue
-    const conflictSet = new Set(result.conflicts ?? []);
+    // Handle conflicts and drain queue atomically to prevent deletion before confirmation
+    await db.transaction('rw', [db.syncQueue, db.sales, db.products, db.auditLogs], async () => {
+      const conflictSet = new Set(result.conflicts ?? []);
 
-    for (const item of queue) {
-      if (conflictSet.has(item.entity_id)) {
-        await db.sales.update(item.entity_id, { sync_status: 'conflict' });
-      } else {
-        await markLocalRecordSynced(item);
+      for (const item of queue) {
+        if (conflictSet.has(item.entity_id)) {
+          await db.sales.update(item.entity_id, { sync_status: 'conflict' });
+        } else {
+          await markLocalRecordSynced(item);
+        }
+
+        if (item.id !== undefined) {
+          await db.syncQueue.delete(item.id);
+          processedCount++;
+        }
       }
 
-      if (item.id !== undefined) {
-        await db.syncQueue.delete(item.id);
-        processedCount++;
-      }
-    }
-
-    // Merge authoritative state
-    await mergeAuthoritativeState(result.authoritative);
+      // Merge authoritative state
+      await mergeAuthoritativeState(result.authoritative);
+    });
 
     console.log(`Sync Engine: Batch /sync complete. Processed ${processedCount} operations.`);
     return { success: true, processedCount };
@@ -108,48 +147,109 @@ async function tryBatchSync(queue: SyncQueueItem[]): Promise<SyncResponse | null
   }
 }
 
-async function sequentialPush(queue: SyncQueueItem[]): Promise<SyncResponse> {
-  let processedCount = 0;
+interface RetryConfig {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  jitterMs: number;
+}
+ 
+const DEFAULT_RETRY_CONFIG: RetryConfig = {
+  maxRetries: 5,
+  baseDelayMs: 2000,
+  maxDelayMs: 300000,
+  jitterMs: 1000
+};
+ 
+export function calculateBackoff(attempt: number, config: RetryConfig): number {
+  const exponentialDelay = config.baseDelayMs * Math.pow(2, attempt - 1);
+  const cappedDelay = Math.min(exponentialDelay, config.maxDelayMs);
+  const jitter = Math.random() * config.jitterMs;
+  return Math.floor(cappedDelay + jitter);
+}
 
-  for (const item of queue) {
-    try {
-      const { id, entity, operation } = item;
-      const result = await pushItemToCloud(item);
+async function sequentialPushWithRetry(queue: SyncQueueItem[], initialProcessedCount: number, sessionId: string): Promise<SyncResponse> {
+  let processedCount = initialProcessedCount;
+  let lastCheckpointId: number | null = null;
+  const config = DEFAULT_RETRY_CONFIG;
 
-      if (result.error) {
-        throw new Error(`Cloud rejection on ${entity} [${operation}]: ${result.error.message}`);
-      }
+  for (let i = 0; i < queue.length; i++) {
+    const item = queue[i];
+    let lastError: Error | null = null;
+    
+    for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
+      try {
+        console.log(`Processing item ${item.id}, attempt ${attempt}/${config.maxRetries}`);
+        
+        const result = await pushItemToCloud(item);
 
-      if (result.conflict) {
-        console.warn(`Conflict detected for sale ${item.entity_id}. Fixing local stock.`);
-
-        await db.sales.update(item.entity_id, { sync_status: 'conflict' });
-
-        if (result.authoritativeProducts) {
-          for (const p of result.authoritativeProducts) {
-            await db.products.update(p.id, {
-              stock: p.stock,
-              sync_status: 'synced',
-            });
-          }
+        if (result.error) {
+          throw new Error(`Cloud rejection on ${item.entity} [${item.operation}]: ${result.error.message}`);
         }
-      } else {
-        await markLocalRecordSynced(item);
-      }
 
-      if (id !== undefined) {
-        await db.syncQueue.delete(id);
-        processedCount++;
+        if (result.conflict) {
+          console.warn(`Conflict detected for sale ${item.entity_id}. Fixing local stock.`);
+          await db.sales.update(item.entity_id, { sync_status: 'conflict' });
+          if (result.authoritativeProducts) {
+            for (const p of result.authoritativeProducts) {
+              await db.products.update(p.id, { stock: p.stock, sync_status: 'synced' });
+            }
+          }
+        } else {
+          await markLocalRecordSynced(item);
+        }
+
+        // Success - delete from queue
+        if (item.id !== undefined) {
+          await db.syncQueue.delete(item.id);
+          processedCount++;
+          lastCheckpointId = item.id;
+        }
+        
+        lastError = null; // Clear any previous error on success
+        
+        // Break retry loop on success
+        break;
+        
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        console.error(`Attempt ${attempt} failed for item ${item.id}:`, lastError.message);
+        
+        if (item.id !== undefined) {
+          await db.syncQueue.update(item.id, {
+            attempt_count: attempt,
+            last_attempt_at: Date.now(),
+            last_error: lastError.message
+          });
+        }
+
+        // If not last attempt, calculate backoff and wait
+        if (attempt < config.maxRetries) {
+          const backoffMs = calculateBackoff(attempt, config);
+          console.log(`Waiting ${backoffMs}ms before retry...`);
+          await new Promise(resolve => setTimeout(resolve, backoffMs));
+        }
       }
-    } catch (err: unknown) {
-      console.error(`Sync Engine stalled at operation ID ${item.id}:`, err);
-      return {
-        success: false,
-        processedCount,
-        error: getErrorMessage(err),
-      };
+    }
+
+    // If all retries failed, move to Dead Letter Queue
+    if (lastError && item.id !== undefined) {
+      console.error(`Item ${item.id} failed after ${config.maxRetries} attempts. Moving to DLQ.`);
+      await moveToDeadLetterQueue(item, lastError);
+      
+      // We still update the checkpoint because the DLQ unblocks the queue
+      processedCount++;
+      lastCheckpointId = item.id;
+    }
+
+    // Save checkpoint at intervals
+    if (i > 0 && i % CHECKPOINT_INTERVAL === 0) {
+      await saveCheckpoint(lastCheckpointId || 0, processedCount, sessionId);
     }
   }
+
+  // Clean up checkpoints on success
+  await db.syncCheckpoints.where('sync_session_id').equals(sessionId).delete();
 
   console.log(`Sync Engine: Queue fully drained. Successfully synchronized ${processedCount} intents.`);
 
@@ -272,7 +372,7 @@ async function pushItemToCloud(item: SyncQueueItem): Promise<PushResult> {
 
   if (item.operation === 'INSERT') {
     const { data, error } = await supabase.rpc('process_sale_with_conflict_check', {
-      sale_payload: payload,
+      sale_payload: { ...payload, idempotency_key: item.idempotency_key },
     });
 
     if (error) return { error };
@@ -364,4 +464,94 @@ function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === 'string') return err;
   return 'Network frame dropped mid-queue streaming.';
+}
+
+// Phase 2: Integrity Verification
+export async function verifyQueueIntegrity(): Promise<{
+  isValid: boolean;
+  issues: string[];
+}> {
+  const issues: string[] = [];
+  
+  try {
+    const queue = await db.syncQueue.toArray();
+    
+    // Check 1: Orphaned items (no corresponding entity)
+    for (const item of queue) {
+      if (item.operation !== 'DELETE') {
+        // We use any cast because TS doesn't know entity strings map to tables perfectly in our dynamic access
+        const entityTable = (db as any)[item.entity === 'audit_logs' ? 'auditLogs' : item.entity];
+        if (entityTable) {
+          const entity = await entityTable.get(item.entity_id);
+          if (!entity) {
+            issues.push(`Orphaned queue item: ${item.id} for ${item.entity}:${item.entity_id}`);
+          }
+        }
+      }
+    }
+    
+    // Check 2: Stale items (pending for too long)
+    const staleThreshold = 86400000; // 24 hours
+    const staleItems = queue.filter(
+      item => item.timestamp < Date.now() - staleThreshold
+    );
+    if (staleItems.length > 0) {
+      issues.push(`Found ${staleItems.length} stale queue items (>24 hours old)`);
+    }
+    
+    // Check 3: Items with excessive retry attempts
+    const maxRetries = 10;
+    const excessiveRetries = queue.filter(
+      item => (item.attempt_count || 0) > maxRetries
+    );
+    if (excessiveRetries.length > 0) {
+      issues.push(`Found ${excessiveRetries.length} items with >${maxRetries} retry attempts`);
+    }
+    
+    // Check 4: Duplicate idempotency keys
+    const keyCounts = new Map<string, number>();
+    for (const item of queue) {
+      if (item.idempotency_key) {
+        const count = keyCounts.get(item.idempotency_key) || 0;
+        keyCounts.set(item.idempotency_key, count + 1);
+      }
+    }
+    for (const [key, count] of keyCounts.entries()) {
+      if (count > 1) {
+        issues.push(`Duplicate idempotency key: ${key} (${count} occurrences)`);
+      }
+    }
+    
+    return {
+      isValid: issues.length === 0,
+      issues
+    };
+    
+  } catch (error) {
+    issues.push(`Integrity check failed: ${error}`);
+    return { isValid: false, issues };
+  }
+}
+ 
+// Call on app startup
+export async function initializeSyncEngine(): Promise<void> {
+  console.log('Initializing Sync Engine...');
+  
+  // Verify queue integrity
+  const integrity = await verifyQueueIntegrity();
+  if (!integrity.isValid) {
+    console.warn('Queue integrity issues detected:', integrity.issues);
+  } else {
+    console.log('Queue integrity verified: OK');
+  }
+  
+  // Clean up old checkpoints
+  const oldCheckpoints = await db.syncCheckpoints
+    .where('created_at')
+    .below(Date.now() - 86400000) // 24 hours old
+    .toArray();
+  if (oldCheckpoints.length > 0) {
+    console.log(`Cleaning up ${oldCheckpoints.length} old checkpoints`);
+    await db.syncCheckpoints.bulkDelete(oldCheckpoints.map(c => c.id as number));
+  }
 }

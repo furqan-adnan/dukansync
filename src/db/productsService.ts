@@ -3,6 +3,8 @@ import { getCachedProfile } from './authService';
 import { getDeviceId } from './deviceId';
 import { getActiveStoreId } from './storesService';
 
+import { generateIdempotencyKey } from '../utils/idempotency';
+
 // Simple, fast client-side UUID generator for offline isolation
 export function generateUUID(): string {
   return crypto.randomUUID();
@@ -20,6 +22,7 @@ export async function createLocalProduct(name: string, barcode: string | null, p
 
   const productId = generateUUID();
   const timestamp = Date.now();
+  const deviceId = getDeviceId();
 
   const newProduct: Product = {
     id: productId,
@@ -47,7 +50,9 @@ export async function createLocalProduct(name: string, barcode: string | null, p
       operation: 'INSERT',
       payload: newProduct,
       timestamp: timestamp,
-      device_id: getDeviceId(),
+      device_id: deviceId,
+      idempotency_key: generateIdempotencyKey(deviceId, timestamp, 'INSERT', productId),
+      attempt_count: 0,
     });
   });
 
