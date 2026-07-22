@@ -32,10 +32,15 @@ import { ReceiptPrint } from './components/ReceiptPrint';
 import { printReceipt } from './utils/printReceipt';
 import { DeadLetterPanel } from './components/DeadLetterPanel';
 import { getDeadLetterStats } from './db/deadLetterService';
+import { SyncStatusBadge } from './components/SyncStatusBadge';
+import { SyncDashboard } from './components/SyncDashboard';
+import { AlertBanner } from './components/AlertBanner';
+import { SyncLogs } from './components/SyncLogs';
+import { startNetworkQualityMonitoring } from './db/networkQualityService';
 
 type CartState = Record<string, number>;
 type SyncState = 'idle' | 'syncing' | 'success' | 'error';
-type AppView = 'pos' | 'reports' | 'conflicts' | 'dlq';
+type AppView = 'pos' | 'reports' | 'conflicts' | 'dlq' | 'dashboard' | 'logs';
 
 function App() {
   const [products, setProducts] = useState<Product[]>([]);
@@ -64,6 +69,11 @@ function App() {
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(true);
+
+  // Start network quality monitoring on mount
+  useEffect(() => {
+    startNetworkQualityMonitoring();
+  }, []);
 
   const refreshData = useCallback(async () => {
     const [localProds, localSales, conflicted, queue, dlqStats] = await Promise.all([
@@ -401,9 +411,7 @@ function App() {
           <button className="secondary-action" type="button" onClick={handleLogout}>
             Logout
           </button>
-          <span className={`sync-pill sync-pill-${syncState}`}>
-            {queueCount === 0 ? 'Cloud current' : `${queueCount} pending`}
-          </span>
+          <SyncStatusBadge onClick={() => setActiveView('dashboard')} />
           {isOwner && activeView === 'pos' && (
             <button className="secondary-action" type="button" onClick={handleAddProduct}>
               New product
@@ -451,18 +459,25 @@ function App() {
             >
               Dead Letters {dlqCount > 0 && `(${dlqCount})`}
             </button>
+            <button
+              className={activeView === 'dashboard' ? 'tab-active' : ''}
+              onClick={() => setActiveView('dashboard')}
+              type="button"
+            >
+              Dashboard
+            </button>
+            <button
+              className={activeView === 'logs' ? 'tab-active' : ''}
+              onClick={() => setActiveView('logs')}
+              type="button"
+            >
+              Sync Logs
+            </button>
           </>
         )}
       </nav>
 
-      {isOwner && dlqCount >= 10 && (
-        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative m-4 shadow-sm" role="alert">
-          <strong className="font-bold">Attention Needed! </strong>
-          <span className="block sm:inline">
-            The Dead Letter Queue has {dlqCount} unresolved items blocking synchronization. Please review them immediately.
-          </span>
-        </div>
-      )}
+      <AlertBanner className="m-4" />
 
       {activeView === 'pos' && (
         <>
@@ -666,6 +681,14 @@ function App() {
         <div className="p-4">
           <DeadLetterPanel />
         </div>
+      )}
+
+      {activeView === 'dashboard' && isOwner && (
+        <SyncDashboard />
+      )}
+
+      {activeView === 'logs' && isOwner && (
+        <SyncLogs />
       )}
 
       <ReceiptPrint

@@ -75,6 +75,27 @@ export interface SyncCheckpoint {
   sync_session_id: string;
 }
 
+// 7. Sync Metrics for operational visibility [Phase 3]
+export interface SyncMetric {
+  id?: number;
+  metric_type: 'sync_attempt' | 'sync_duration' | 'queue_size' | 'dlq_addition' | 'network_quality';
+  value: number;
+  timestamp: number;
+  metadata?: Record<string, unknown>;
+}
+
+// 8. Sync Logs for historical sync operations [Phase 3]
+export interface SyncLog {
+  id?: number;
+  timestamp: number;
+  operation: 'batch_sync' | 'sequential_sync' | 'dlq_retry' | 'integrity_check';
+  status: 'success' | 'failure' | 'partial';
+  duration_ms: number;
+  items_processed: number;
+  error_message?: string;
+  metadata?: Record<string, unknown>;
+}
+
 class DukanSyncDatabase extends Dexie {
   products!: Table<Product>;
   sales!: Table<Sale>;
@@ -83,6 +104,8 @@ class DukanSyncDatabase extends Dexie {
 
   deadLetterQueue!: Table<DeadLetterQueueItem>;
   syncCheckpoints!: Table<SyncCheckpoint>;
+  syncMetrics!: Table<SyncMetric>;
+  syncLogs!: Table<SyncLog>;
 
   constructor() {
     super('DukanSyncDB');
@@ -117,6 +140,18 @@ class DukanSyncDatabase extends Dexie {
       syncQueue: '++id, entity, operation, timestamp, idempotency_key',
       deadLetterQueue: '++id, resolved, failed_at',
       syncCheckpoints: '++id, sync_session_id, created_at'
+    });
+
+    // Phase 3 Migration: Add Metrics and Logs
+    this.version(5).stores({
+      products: 'id, store_id, barcode, sync_status, updated_at',
+      sales: 'id, store_id, sync_status, updated_at',
+      auditLogs: 'id, store_id, sync_status, timestamp',
+      syncQueue: '++id, entity, operation, timestamp, idempotency_key',
+      deadLetterQueue: '++id, resolved, failed_at',
+      syncCheckpoints: '++id, sync_session_id, created_at',
+      syncMetrics: '++id, metric_type, timestamp',
+      syncLogs: '++id, timestamp, status, operation'
     });
   }
 }
